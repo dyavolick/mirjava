@@ -1,0 +1,78 @@
+name: Publish Athex
+
+on:
+  push:
+    branches:
+    - master
+
+jobs:
+  build:
+    runs-on: ubuntu-18.04
+    
+    steps:
+    - uses: actions/checkout@v1
+  
+    - name: Install .Net 3.0
+      run: |
+        wget -q https://packages.microsoft.com/config/ubuntu/18.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+        sudo dpkg -i packages-microsoft-prod.deb
+        sudo add-apt-repository universe
+        sudo apt-get update && sudo apt-get install apt-transport-https dotnet-sdk-3.0
+       
+    - name: Restore project
+      run: |
+        dotnet restore
+        
+    - name: Build project
+      run: |
+        dotnet build -c Release
+        
+    - name: Publish project
+      run: |
+        dotnet publish -c Release -o ./app
+        
+    - name: Build docker image and push it to the registry
+      env:
+        DOCKER_IMAGE_ORIGIN: "docker.pkg.github.com/dyavolick/${{ secrets.REPOSITORY_NAME }}/${{ secrets.REPOSITORY_NAME }}"
+      run: |
+        docker login docker.pkg.github.com -u dyavolick -p ${{ secrets.GH_TOKEN }}
+        docker build -t ${DOCKER_IMAGE_ORIGIN}:${GITHUB_SHA} .
+        docker tag ${DOCKER_IMAGE_ORIGIN}:${GITHUB_SHA} ${DOCKER_IMAGE_ORIGIN}:latest
+        docker push ${DOCKER_IMAGE_ORIGIN}:${GITHUB_SHA}
+        docker push ${DOCKER_IMAGE_ORIGIN}:latest
+
+    - name: Copy conf to server
+      uses: garygrossgarten/github-action-scp@release
+      with:
+        local: ./conf
+        remote: ./siteconf
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USER }}
+        password: ${{ secrets.SSH_PASSWORD }}
+
+    - name: Run project
+      uses: garygrossgarten/github-action-ssh@release
+      with:
+        command: |
+          docker login docker.pkg.github.com -u dyavolick -p ${{ secrets.GH_TOKEN }}
+          docker pull docker.pkg.github.com/dyavolick/${{ secrets.REPOSITORY_NAME }}/${{ secrets.REPOSITORY_NAME }}:latest
+          docker rm -f ${{ secrets.REPOSITORY_NAME }} &>/dev/null && echo 'Removed old container'
+          docker run -d --restart=always -p 127.0.0.1:${{ secrets.DOCKER_PORT }}:80 -v $HOME/${{ secrets.REPOSITORY_NAME }}/sitefiles:/app/wwwroot/sitefiles --name ${{ secrets.REPOSITORY_NAME }} docker.pkg.github.com/dyavolick/${{ secrets.REPOSITORY_NAME }}/${{ secrets.REPOSITORY_NAME }}
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USER }}
+        password: ${{ secrets.SSH_PASSWORD }}
+        #passphrase: ${{ secrets.PASSPHRASE }}
+        #privateKey: ${{ secrets.PRIVATE_KEY}}    
+        
+    - name: Update config
+      uses: garygrossgarten/github-action-ssh@release
+      with:
+        command: |
+          sh CertificateCreator.sh ${{ secrets.SITE_URL }}
+          cp -f ./siteconf/${{ secrets.SITE_URL }}.conf /etc/nginx/sites-available/
+          ln -sf /etc/nginx/sites-available/${{ secrets.SITE_URL }}.conf /etc/nginx/sites-enabled/          
+          systemctl reload nginx
+          rm -r ./siteconf
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USER }}
+        password: ${{ secrets.SSH_PASSWORD }}
